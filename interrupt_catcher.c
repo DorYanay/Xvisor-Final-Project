@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <signal.h>
+#include <time.h>
+#include <fcntl.h>
 
 #define TRUE 1
 #define FALSE 0
@@ -100,6 +102,22 @@ void signal_handler(int signum) {
     running = 0;
 }
 
+void generate_interrupts() {
+    // Generate disk I/O interrupt
+    FILE *file = fopen("/tmp/test_file", "w");
+    if (file != NULL) {
+        fprintf(file, "Test data for interrupt generation");
+        fclose(file);
+        remove("/tmp/test_file");
+    }
+
+    // Generate network-related interrupt (this might not work in all environments)
+    system("ping -c 1 localhost &>/dev/null");
+
+    // Generate timer interrupt
+    usleep(1000);
+}
+
 int main() {
     char vendor[13] = {0};
     InterruptInfo interrupts_prev[MAX_INTERRUPTS], interrupts_curr[MAX_INTERRUPTS];
@@ -113,14 +131,30 @@ int main() {
     printf("CPU Vendor: %s\n", vendor);
     printf("Hypervisor present: %s\n", cpu_hv() ? "Yes" : "No");
 
+    // Get CPU frequency
+    uint64_t cntfrq;
+    asm volatile("mrs %0, cntfrq_el0" : "=r" (cntfrq));
+    double cntfrq_mhz = (double)cntfrq / 1000000;
+
+    printf("CPU Frequency: %.2f MHz\n", cntfrq_mhz);
     printf("\nMonitoring interrupts. Press Ctrl+C to stop.\n\n");
 
     read_interrupts(interrupts_prev, &count_prev);
-    uint64_t time_prev = get_system_time();
+    uint64_t last_check_time = get_system_time();
 
+    int iteration = 0;
     while (running) {
+        usleep(100000);  // Sleep for 100ms
+
+        // Generate interrupts every 10 iterations (approximately every 1 second)
+        if (++iteration % 10 == 0) {
+            generate_interrupts();
+        }
+
+        uint64_t current_time = get_system_time();
         read_interrupts(interrupts_curr, &count_curr);
-        uint64_t time_curr = get_system_time();
+
+        double elapsed_ms = (double)(current_time - last_check_time) / cntfrq_mhz / 1000.0;
 
         for (int i = 0; i < count_curr; i++) {
             int prev_index = -1;
@@ -134,19 +168,17 @@ int main() {
             if (prev_index != -1) {
                 unsigned long long count_diff = interrupts_curr[i].count - interrupts_prev[prev_index].count;
                 if (count_diff > 0) {
-                    uint64_t time_diff = time_curr - time_prev;
-                    double time_per_interrupt = (double)time_diff / count_diff;
-                    printf("Interrupt: IRQ %d, Name: %-20s, Count: %-5llu, Avg Time: %.2f cycles\n",
-                           interrupts_curr[i].irq, interrupts_curr[i].name, count_diff, time_per_interrupt);
+                    double avg_time_between_ms = elapsed_ms / count_diff;
+
+                    printf("Interrupt: IRQ %d, Name: %-20s, Count: %-5llu, Elapsed Time: %.3f ms, Avg Time Between: %.3f ms\n",
+                           interrupts_curr[i].irq, interrupts_curr[i].name, count_diff, elapsed_ms, avg_time_between_ms);
                 }
             }
         }
 
         memcpy(interrupts_prev, interrupts_curr, sizeof(InterruptInfo) * count_curr);
         count_prev = count_curr;
-        time_prev = time_curr;
-
-        usleep(1000);  // Sleep for 1ms to reduce CPU usage
+        last_check_time = current_time;
     }
 
     printf("\nInterrupt monitoring stopped.\n");
