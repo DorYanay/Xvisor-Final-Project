@@ -4,12 +4,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <signal.h>
-#include <fcntl.h>
-#include <ctype.h>
-#include <sys/select.h>
+#include <time.h>
 
-#define TRUE 1
-#define FALSE 0
 #define MAX_INTERRUPTS 256
 
 typedef struct {
@@ -19,36 +15,6 @@ typedef struct {
 } InterruptInfo;
 
 volatile sig_atomic_t running = 1;
-
-static inline uint64_t get_system_time() {
-    uint64_t time;
-    asm volatile("mrs %0, cntvct_el0" : "=r" (time));
-    return time;
-}
-
-static inline void get_cpu_info(char* vendor, char* brand) {
-    uint64_t midr;
-    asm volatile("mrs %0, midr_el1" : "=r" (midr));
-    
-    uint8_t implementer = (midr >> 24) & 0xFF;
-    uint8_t variant = (midr >> 20) & 0xF;
-    uint8_t architecture = (midr >> 16) & 0xF;
-    uint16_t part_num = (midr >> 4) & 0xFFF;
-    
-    sprintf(vendor, "ARM%02X%01X%01X%03X", implementer, variant, architecture, part_num);
-    strcpy(brand, "ARM Processor");
-}
-
-int cpu_hv() {
-    uint64_t id_aa64pfr0;
-    asm volatile("mrs %0, id_aa64pfr0_el1" : "=r" (id_aa64pfr0));
-    return ((id_aa64pfr0 >> 40) & 0xF) != 0 ? TRUE : FALSE;
-}
-
-void cpu_write_vendor(char* vendor) {
-    char brand[49];
-    get_cpu_info(vendor, brand);
-}
 
 void read_interrupts(InterruptInfo *interrupts, int *count) {
     FILE *fp = fopen("/proc/interrupts", "r");
@@ -104,34 +70,22 @@ void signal_handler(int signum) {
 }
 
 void clear_screen() {
-    printf("\033[2J");    // ANSI escape code to clear screen
-    printf("\033[H");     // Move cursor to home position
+    printf("\033[2J");
+    printf("\033[H");
 }
 
 int main() {
-    char vendor[13] = {0};
     InterruptInfo interrupts_prev[MAX_INTERRUPTS], interrupts_curr[MAX_INTERRUPTS];
     int count_prev, count_curr;
 
     signal(SIGINT, signal_handler);
 
-    printf("ARM64 CPU and Interrupt Monitor:\n\n");
-
-    cpu_write_vendor(vendor);
-    printf("CPU Vendor: %s\n", vendor);
-    printf("Hypervisor present: %s\n", cpu_hv() ? "Yes" : "No");
-
-    // Get CPU frequency
-    uint64_t cntfrq;
-    asm volatile("mrs %0, cntfrq_el0" : "=r" (cntfrq));
-    double cntfrq_mhz = (double)cntfrq / 1000000;
-
-    printf("CPU Frequency: %.2f MHz\n", cntfrq_mhz);
-    printf("\nMonitoring interrupts. Press Enter to refresh, 'r' to reset baseline, 'q' to quit.\n");
+    printf("Interrupt Monitor\n\n");
+    printf("Monitoring interrupts. Press Enter to refresh, 'r' to reset baseline, 'q' to quit.\n");
     printf("Perform actions in another terminal to generate interrupts.\n\n");
 
     read_interrupts(interrupts_prev, &count_prev);
-    uint64_t last_check_time = get_system_time();
+    time_t last_check_time = time(NULL);
 
     char input[3];
     while (running) {
@@ -140,17 +94,17 @@ int main() {
                 clear_screen();
                 printf("Resetting interrupt baseline...\n");
                 read_interrupts(interrupts_prev, &count_prev);
-                last_check_time = get_system_time();
+                last_check_time = time(NULL);
                 continue;
             } else if (input[0] == 'q') {
                 running = 0;
                 break;
             }
 
-            uint64_t current_time = get_system_time();
+            time_t current_time = time(NULL);
             read_interrupts(interrupts_curr, &count_curr);
 
-            double elapsed_ms = (double)(current_time - last_check_time) / cntfrq_mhz / 1000.0;
+            double elapsed_seconds = difftime(current_time, last_check_time);
 
             for (int i = 0; i < count_curr; i++) {
                 int prev_index = -1;
@@ -164,10 +118,10 @@ int main() {
                 if (prev_index != -1) {
                     unsigned long long count_diff = interrupts_curr[i].count - interrupts_prev[prev_index].count;
                     if (count_diff > 0) {
-                        double avg_time_between_ms = elapsed_ms / count_diff;
+                        double rate = count_diff / elapsed_seconds;
 
-                        printf("Interrupt: IRQ %d, Name: %-20s, Count: %-5llu, Elapsed Time: %.3f ms, Avg Time Between: %.3f ms\n",
-                               interrupts_curr[i].irq, interrupts_curr[i].name, count_diff, elapsed_ms, avg_time_between_ms);
+                        printf("Interrupt: IRQ %d, Name: %-20s, Count: %-5llu, Rate: %.2f/s\n",
+                               interrupts_curr[i].irq, interrupts_curr[i].name, count_diff, rate);
                     }
                 }
             }
